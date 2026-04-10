@@ -2,9 +2,8 @@ name: Daily IG Scrape
 
 on:
   schedule:
-    # Run at 17:00 UTC = 9am AEDT (Sydney). Adjust to your timezone.
-    # 17:00 UTC covers most US timezones mid-morning and Europe afternoon.
-    - cron: "0 17 * * *"
+    # Run at 16:45 UTC = 11:45pm ICT (Vietnam). Adjust to your timezone.
+    - cron: "45 16 * * *"
   workflow_dispatch:   # manual trigger at github.com/actions
 
 jobs:

@@ -178,9 +178,9 @@ def scrape_post_urls(post_urls: list[str]) -> list[dict]:
 def at_headers():
     return {"Authorization": f"Bearer {AIRTABLE_PAT}", "Content-Type": "application/json"}
 
-def at_find_row(shortcode: str, scrape_date: str, scrape_age: str) -> dict | None:
-    """Find existing row by SHORTCODE + SCRAPE DATE + SCRAPE AGE."""
-    formula = f"AND({{SHORTCODE}}='{shortcode}',{{SCRAPE DATE}}='{scrape_date}',{{SCRAPE AGE}}='{scrape_age}')"
+def at_find_row(shortcode: str, hours_old: int) -> dict | None:
+    """Find existing row by SHORTCODE + HOURS_OLD (precise dedup)."""
+    formula = f"AND({{SHORTCODE}}='{shortcode}',{{HOURS OLD}}={hours_old})"
     r = requests.get(
         f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}",
         headers=at_headers(),
@@ -202,18 +202,17 @@ def at_find_existing_snapshots(shortcode: str) -> dict:
     )
     r.raise_for_status()
     records = r.json().get("records", [])
-    return {(rec["fields"].get("SCRAPE DATE",""), rec["fields"].get("SCRAPE AGE","")): rec for rec in records}
+    return {rec["fields"].get("SHORTCODE", ""): rec for rec in records}
 
 def at_upsert(fields: dict, dry_run: bool) -> str:
     """Create or update a row. Returns record ID. Retries on timeout."""
     shortcode = fields.get("SHORTCODE", "")
-    scrape_date = fields.get("SCRAPE DATE", "")
-    scrape_age = fields.get("SCRAPE AGE", "")
+    hours_old = fields.get("HOURS OLD", 0)
 
-    existing = at_find_row(shortcode, scrape_date, scrape_age)
+    existing = at_find_row(shortcode, hours_old)
 
     if dry_run:
-        print(f"    [DRY] {'UPDATE' if existing else 'CREATE'}: {shortcode} {scrape_age} {scrape_date}")
+        print(f"    [DRY] {'UPDATE' if existing else 'CREATE'}: {shortcode} {hours_old}h")
         print(f"         likes={fields.get('LIKES')}, views={fields.get('VIEWS')}, followers={fields.get('FOLLOWERS AT SCRAPE')}")
         return existing["id"] if existing else "dry-run-id"
 
@@ -282,6 +281,7 @@ def build_fields(
     profile_url: str,
     scrape_date: date,
     scrape_age: str,
+    hrs: int,
     followers: int,
 ) -> dict:
     """Build Airtable fields dict for a single post snapshot."""
@@ -310,6 +310,8 @@ def build_fields(
         "WEEK NO":            week_number(posted_dt),
         "SCRAPE DATE":         scrape_date.isoformat(),
         "SCRAPE AGE":          scrape_age,
+        "HOURS OLD":           hrs,
+        "LAST SCRAPED":        datetime.now(timezone.utc).isoformat(),
         "FOLLOWERS AT SCRAPE": followers,
         "LIKES":              likes,
         "COMMENTS":           comments,
@@ -378,7 +380,7 @@ def process_account(account: dict, all_posts: list[dict], today: date, dry_run: 
 
         print(f"    {name} | {shortcode[:12]} | {hrs}h | {age_label} | followers={followers}")
 
-        fields = build_fields(post, name, profile_url, today, age_label, followers)
+        fields = build_fields(post, name, profile_url, today, age_label, hrs, followers)
         at_upsert(fields, dry_run)
         rows_written += 1
 
