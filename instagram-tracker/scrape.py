@@ -30,7 +30,7 @@ load_dotenv()
 APIFY_TOKEN  = os.environ.get("APIFY_TOKEN", "")
 AIRTABLE_PAT = os.environ.get("AIRTABLE_PAT", "")
 BASE_ID      = "appi9PUu4ZqKiOXkw"
-TABLE_ID     = "tbldSoSrRuAEdQ9Ya"
+TABLE_ID     = "tblCWODP44zR22p8D"
 
 # -- ACCOUNTS ------------------------------------------------------------------
 
@@ -122,23 +122,26 @@ def apify_post_scraper(usernames: list[str], newer_than: str = "1 day") -> list[
     return posts
 
 
-def apify_scrape_post(post_url: str) -> dict:
-    """Use instagram-scraper to get detailed stats for a single post URL."""
+def apify_scrape_posts(post_urls: list[str]) -> dict[str, dict]:
+    """Batch scrape multiple post URLs in one Apify call. Returns {shortcode: post_data}."""
+    if not post_urls:
+        return {}
     headers = {"Authorization": f"Bearer {APIFY_TOKEN}", "Content-Type": "application/json"}
     r = requests.post(
         "https://api.apify.com/v2/acts/apify~instagram-scraper/runs",
         headers=headers,
         json={
-            "directUrls": [post_url],
+            "directUrls": post_urls,
             "resultsType": "posts",
-            "resultsLimit": 1,
+            "resultsLimit": len(post_urls),
         },
         timeout=30,
     )
     r.raise_for_status()
     run_id = r.json()["data"]["id"]
+    print(f"  Batch Apify run: {run_id}")
 
-    for i in range(30):
+    for i in range(60):
         time.sleep(10)
         sr = requests.get(
             f"https://api.apify.com/v2/acts/apify~instagram-scraper/runs/{run_id}",
@@ -146,22 +149,29 @@ def apify_scrape_post(post_url: str) -> dict:
         )
         sr.raise_for_status()
         status = sr.json()["data"]["status"]
+        if i % 3 == 0:
+            print(f"  [{i * 10}s] {status}")
         if status == "SUCCEEDED":
             break
         if status in ("FAILED", "ABORTED", "TIMED-OUT"):
             raise RuntimeError(f"Apify run ended: {status}")
     else:
-        raise TimeoutError("Apify timed out after 5 minutes")
+        raise TimeoutError("Apify timed out after 10 minutes")
 
     ds = sr.json()["data"]["defaultDatasetId"]
     ir = requests.get(
-        f"https://api.apify.com/v2/datasets/{ds}/items?limit=5",
-        headers=headers, timeout=30
+        f"https://api.apify.com/v2/datasets/{ds}/items?limit={len(post_urls) * 2}",
+        headers=headers, timeout=60
     )
     ir.raise_for_status()
     items = ir.json()
-    posts = [x for x in items if x.get("shortCode") or x.get("code")]
-    return posts[0] if posts else {}
+    result = {}
+    for x in items:
+        sc = x.get("shortCode") or x.get("code") or ""
+        if sc:
+            result[sc] = x
+    print(f"  Batch returned {len(result)} posts")
+    return result
 
 # -- AIRTABLE ------------------------------------------------------------------
 
@@ -225,11 +235,10 @@ def at_fetch_pending(age_days: int = 5) -> list[dict]:
         data = r.json()
         for rec in data.get("records", []):
             f = rec["fields"]
-            # Filter in Python — Airtable filter formulas can fail on field names with spaces
-            status = f.get("SCRAPE STATUS") or f.get("SCRAPE_STATUS") or ""
+            status = f.get("SCRAPE STATUS") or ""
             if status != "PENDING":
                 continue
-            date_posted = f.get("DATE POSTED") or f.get("DATE_POSTED") or ""
+            date_posted = f.get("DATE POSTED") or ""
             if not date_posted:
                 continue
             try:
@@ -241,8 +250,8 @@ def at_fetch_pending(age_days: int = 5) -> list[dict]:
             if hours_old >= age_days * 24:
                 pending.append({
                     "record_id":   rec["id"],
-                    "shortcode":   f.get("SHORTCODE") or f.get("SHORTCODE", ""),
-                    "post_url":    f.get("POST URL") or f.get("POST_URL", ""),
+                    "shortcode":   f.get("SHORTCODE", ""),
+                    "post_url":    f.get("POST URL", ""),
                     "date_posted": date_posted,
                 })
         offset = data.get("offset")
@@ -329,69 +338,75 @@ def run_phase1(usernames: list[str], index: dict, dry_run: bool) -> dict:
 
 # -- PHASE 2: STATS CAPTURE ----------------------------------------------------
 
-def run_phase2(dry_run: bool) -> dict:
+def run_phase2(dry_run: bool, backfill: bool = False) -> dict:
     """
-    Find PENDING rows >= 5 days old.
-    Use instagram-scraper to get fresh stats.
+    Find PENDING rows >= 5 days old (or ALL PENDING if backfill=True).
+    Batch scrape all post URLs via Apify, then update Airtable.
     Only UPDATE — never create.
     """
-    stats = {"captured": 0, "still_pending": 0, "errors": 0}
-    pending_rows = at_fetch_pending(age_days=5)
+    stats = {"captured": 0, "errors": 0}
+    age_days = 0 if backfill else 5
+    pending_rows = at_fetch_pending(age_days=age_days)
 
     if not pending_rows:
-        print("\n[Phase 2] No PENDING rows >= 5 days old.")
+        print("\n[Phase 2] No PENDING rows to capture.")
         return stats
 
-    print(f"\n[Phase 2] Found {len(pending_rows)} PENDING rows >= 5 days old")
-    print("  Scraping stats from Apify...")
+    post_urls = [row["post_url"] for row in pending_rows if row["post_url"]]
+    shortcode_map = {row["post_url"]: row for row in pending_rows}
 
-    for row in pending_rows:
-        sc       = row["shortcode"]
-        post_url = row["post_url"]
-        record_id = row["record_id"]
+    print(f"\n[Phase 2] Found {len(pending_rows)} PENDING rows")
+    print(f"  Scraping {len(post_urls)} posts in batch...")
 
-        if not post_url:
-            stats["errors"] += 1
-            continue
+    if dry_run:
+        print(f"  [DRY] Would scrape {len(post_urls)} posts")
+        return {"captured": len(post_urls), "errors": 0}
 
-        print(f"  Scraping {sc[:12]}...", end=" ", flush=True)
+    # Batch scrape all at once
+    scraped = apify_scrape_posts(post_urls)
 
-        if dry_run:
-            print(f"[DRY] WOULD SCRAPE")
+    # Update Airtable in batches of 10
+    BATCH_SIZE = 10
+    for i in range(0, len(pending_rows), BATCH_SIZE):
+        batch = pending_rows[i:i + BATCH_SIZE]
+        records = []
+        for row in batch:
+            sc = row["shortcode"]
+            post_url = row["post_url"]
+            record_id = row["record_id"]
+
+            if not post_url or sc not in scraped:
+                stats["errors"] += 1
+                continue
+
+            post = scraped[sc]
+            views    = post.get("videoPlayCount") or post.get("videoViewCount") or 0
+            likes    = post.get("likesCount") or 0
+            comments = post.get("commentsCount") or 0
+
+            records.append({
+                "id": record_id,
+                "fields": {
+                    "LIKES":         likes,
+                    "COMMENTS":      comments,
+                    "VIEWS":         views,
+                    "PLAYS":         views,
+                    "SCRAPE STATUS": "OK",
+                }
+            })
             stats["captured"] += 1
-            continue
 
-        try:
-            post = apify_scrape_post(post_url)
-        except Exception as e:
-            print(f"ERROR: {e}")
-            stats["errors"] += 1
-            time.sleep(1)
-            continue
+        if records:
+            payload = {"records": records}
+            try:
+                at_request("patch", f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}", payload)
+                print(f"  Batch {i//BATCH_SIZE + 1}: {len(records)} updated")
+            except Exception as e:
+                print(f"  Batch {i//BATCH_SIZE + 1} ERROR: {e}")
+                stats["errors"] += len(records)
+                stats["captured"] -= len(records)
 
-        views    = post.get("videoPlayCount") or post.get("videoViewCount") or 0
-        likes    = post.get("likesCount") or 0
-        comments = post.get("commentsCount") or 0
-        today    = date.today().isoformat()
-
-        fields = {
-            "LIKES":          likes,
-            "COMMENTS":       comments,
-            "VIEWS":          views,
-            "PLAYS":          views,
-            "SCRAPE STATUS":  "CAPTURED",
-            "SCRAPE DATE":    today,
-        }
-
-        try:
-            at_update(record_id, fields)
-            print(f"captured (likes:{likes} views:{views})")
-            stats["captured"] += 1
-        except Exception as e:
-            print(f"ERROR: {e}")
-            stats["errors"] += 1
-
-        time.sleep(1)  # Be nice to Apify
+        time.sleep(0.5)
 
     return stats
 
@@ -401,7 +416,8 @@ def main():
     parser = argparse.ArgumentParser(description="ALJ Instagram Two-Phase Scraper")
     parser.add_argument("--dry-run",      action="store_true", help="Print what would happen, no writes")
     parser.add_argument("--phase1-only", action="store_true", help="Discovery only (new posts in last 24h)")
-    parser.add_argument("--phase2-only",  action="store_true", help="Stats capture only (PENDING rows >= 5 days)")
+    parser.add_argument("--phase2-only", action="store_true", help="Stats capture only (PENDING rows >= 5 days)")
+    parser.add_argument("--backfill",    action="store_true", help="Backfill: scrape ALL PENDING rows regardless of age")
     args = parser.parse_args()
 
     if not APIFY_TOKEN:
@@ -431,7 +447,7 @@ def main():
         p1_stats = run_phase1(usernames, index, args.dry_run)
 
     if run_phase2_flag:
-        p2_stats = run_phase2(args.dry_run)
+        p2_stats = run_phase2(args.dry_run, backfill=args.backfill)
 
     # Summary
     print(f"\n{'=' * 60}")
