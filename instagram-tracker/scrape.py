@@ -68,17 +68,19 @@ def shortcode_from_url(url: str) -> str:
 # -- APIFY ---------------------------------------------------------------------
 
 def apify_post_scraper(usernames: list[str], newer_than: str = "1 day") -> list[dict]:
-    """Use instagram-post-scraper to get posts from usernames. Returns list of post dicts."""
+    """Use instagram-scraper to get posts from usernames. Returns list of post dicts."""
     headers = {"Authorization": f"Bearer {APIFY_TOKEN}", "Content-Type": "application/json"}
+    # Build profile URLs for each username
+    profile_urls = [f"https://www.instagram.com/{u}/" for u in usernames]
     r = requests.post(
-        "https://api.apify.com/v2/acts/apify~instagram-post-scraper/runs",
+        "https://api.apify.com/v2/acts/apify~instagram-scraper/runs",
         headers=headers,
         json={
-            "dataDetailLevel": "basicData",
+            "directUrls": profile_urls,
+            "resultsType": "posts",
             "onlyPostsNewerThan": newer_than,
             "resultsLimit": 24,
             "skipPinnedPosts": False,
-            "username": usernames,
         },
         timeout=30,
     )
@@ -89,7 +91,7 @@ def apify_post_scraper(usernames: list[str], newer_than: str = "1 day") -> list[
     for i in range(60):
         time.sleep(10)
         sr = requests.get(
-            f"https://api.apify.com/v2/acts/apify~instagram-post-scraper/runs/{run_id}",
+            f"https://api.apify.com/v2/acts/apify~instagram-scraper/runs/{run_id}",
             headers=headers, timeout=15
         )
         sr.raise_for_status()
@@ -110,7 +112,12 @@ def apify_post_scraper(usernames: list[str], newer_than: str = "1 day") -> list[
     )
     ir.raise_for_status()
     items = ir.json()
-    posts = [x for x in items if x.get("shortCode")]
+    # instagram-scraper returns "code" instead of "shortCode"
+    posts = []
+    for x in items:
+        sc = x.get("shortCode") or x.get("code") or ""
+        if sc:
+            posts.append(x)
     print(f"  Scraped {len(posts)} posts from {len(usernames)} accounts")
     return posts
 
@@ -268,7 +275,7 @@ def run_phase1(usernames: list[str], index: dict, dry_run: bool) -> dict:
         return stats
 
     for post in posts:
-        sc = post.get("shortCode", "")
+        sc = post.get("shortCode") or post.get("code") or ""
         if not sc:
             continue
 
