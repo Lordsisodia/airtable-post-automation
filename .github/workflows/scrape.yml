@@ -1,33 +1,66 @@
 name: Daily IG Scrape
 
 on:
-  workflow_dispatch:   # manual trigger only at github.com/actions
+  workflow_dispatch:   # manual trigger only
 
 jobs:
-  scrape:
+  # Phase 1: Discovery — new posts (runs on every trigger)
+  phase1:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Install dependencies
         run: pip install requests python-dotenv
-
-      - name: Run scrape
+      - name: Phase 1 — Discover new posts (last 24h)
         env:
           AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
           APIFY_TOKEN:  ${{ secrets.APIFY_TOKEN }}
         run: |
           cd instagram-tracker
-          python scrape.py
+          python scrape.py --phase1-only
 
+  # Phase 2: Stats Capture — PENDING rows >= 5 days old
+  phase2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: phase1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+      - name: Phase 2 — Capture 5-day stats
+        env:
+          AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
+          APIFY_TOKEN:  ${{ secrets.APIFY_TOKEN }}
+        run: |
+          cd instagram-tracker
+          python scrape.py --phase2-only
+
+  # Compute benchmarks
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: phase2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install requests python-dotenv
       - name: Compute benchmark scores
         env:
           AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
