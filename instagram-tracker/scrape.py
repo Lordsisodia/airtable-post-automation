@@ -311,7 +311,6 @@ def build_fields(
         "SCRAPE DATE":         scrape_date.isoformat(),
         "SCRAPE AGE":          scrape_age,
         "HOURS OLD":           hrs,
-        "LAST SCRAPED":        datetime.now(timezone.utc).isoformat(),
         "FOLLOWERS AT SCRAPE": followers,
         "LIKES":              likes,
         "COMMENTS":           comments,
