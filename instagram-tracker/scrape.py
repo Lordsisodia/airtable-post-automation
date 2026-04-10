@@ -206,7 +206,6 @@ def at_fetch_pending(age_days: int = 5) -> list[dict]:
     while True:
         params = {
             "pageSize": 100,
-            "filterByFormula": "{SCRAPE STATUS}='PENDING'",
             "fields[]": ["SHORTCODE", "POST URL", "DATE POSTED", "SCRAPE STATUS"],
         }
         if offset:
@@ -219,7 +218,11 @@ def at_fetch_pending(age_days: int = 5) -> list[dict]:
         data = r.json()
         for rec in data.get("records", []):
             f = rec["fields"]
-            date_posted = f.get("DATE POSTED", "")
+            # Filter in Python — Airtable filter formulas can fail on field names with spaces
+            status = f.get("SCRAPE STATUS") or f.get("SCRAPE_STATUS") or ""
+            if status != "PENDING":
+                continue
+            date_posted = f.get("DATE POSTED") or f.get("DATE_POSTED") or ""
             if not date_posted:
                 continue
             try:
@@ -231,8 +234,8 @@ def at_fetch_pending(age_days: int = 5) -> list[dict]:
             if hours_old >= age_days * 24:
                 pending.append({
                     "record_id":   rec["id"],
-                    "shortcode":   f.get("SHORTCODE", ""),
-                    "post_url":    f.get("POST URL", ""),
+                    "shortcode":   f.get("SHORTCODE") or f.get("SHORTCODE", ""),
+                    "post_url":    f.get("POST URL") or f.get("POST_URL", ""),
                     "date_posted": date_posted,
                 })
         offset = data.get("offset")
