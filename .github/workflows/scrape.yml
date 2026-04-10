@@ -6,7 +6,6 @@ on:
     # 17:00 UTC covers most US timezones mid-morning and Europe afternoon.
     - cron: "0 17 * * *"
   workflow_dispatch:   # manual trigger at github.com/actions
-  push:               # also run on every push (for testing)
 
 jobs:
   scrape:
