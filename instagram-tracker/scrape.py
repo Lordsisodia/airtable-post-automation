@@ -49,8 +49,13 @@ MAX_SCRAPE_AGE_HOURS = 120   # only track posts up to 5 days old
 
 # ── HELPERS ────────────────────────────────────────────────────────────────────
 
-def shortcode_from_url(url: str) -> str:
-    m = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9_-]+)", url or "")
+def shortcode_from_url(url) -> str:
+    """Handle both plain URL strings and Airtable URL field objects {url, text}."""
+    if isinstance(url, dict):
+        url = url.get("url", "") or ""
+    elif not isinstance(url, str):
+        url = ""
+    m = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9_-]+)", url)
     return m.group(1) if m else ""
 
 def week_number(d: date) -> str:
