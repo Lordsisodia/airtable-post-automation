@@ -1,12 +1,7 @@
 name: Daily IG Scrape
 
 on:
-  workflow_dispatch:        # manual trigger only — DISABLED SCHEDULE
-                            # To re-enable: add back the cron entries below
-  # schedule:
-  #   - cron: "0 6 * * *"    # 6am UTC
-  #   - cron: "0 18 * * *"   # 6pm UTC
-  push:                    # run on every push (for testing)
+  workflow_dispatch:   # manual trigger only at github.com/actions
 
 jobs:
   scrape:
