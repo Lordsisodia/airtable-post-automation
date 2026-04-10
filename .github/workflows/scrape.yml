@@ -24,14 +24,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r scripts/instagram-tracker/requirements.txt
+          pip install -r instagram-tracker/requirements.txt
 
       - name: Run scrape
         env:
           AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
           APIFY_TOKEN:  ${{ secrets.APIFY_TOKEN }}
         run: |
-          cd scripts/instagram-tracker
+          cd instagram-tracker
           python scrape.py
 
       - name: Compute benchmark scores
