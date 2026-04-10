@@ -249,7 +249,7 @@ def at_get_recent_post_urls(account_name: str, days_back: int = 7) -> list[str]:
     formula = (
         f"AND({{ACCOUNT}}='{account_name}',"
         f"IS_AFTER({{DATE POSTED}},'{cutoff}'),"
-        f"OR({{REEL 1}}!='',{{REEL 2}}!='',{{PIC}}!=''))"
+        f"OR({{OPEN REEL}}!='',{{OPEN REEL 2}}!='',{{OPEN PIC}}!=''))"
     )
     r = requests.get(
         f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}",
@@ -263,7 +263,7 @@ def at_get_recent_post_urls(account_name: str, days_back: int = 7) -> list[str]:
     urls = []
     for rec in records:
         ef = rec["fields"]
-        for field in ("REEL 1", "REEL 2", "PIC"):
+        for field in ("OPEN REEL", "OPEN REEL 2", "OPEN PIC"):
             u = ef.get(field, "")
             if u and shortcode_from_url(u):
                 urls.append(u)
