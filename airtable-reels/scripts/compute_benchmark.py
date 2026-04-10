@@ -100,11 +100,14 @@ def benchmark_points(bs):
     return min(1000, round(math.pow(bs, 1.15) * 215 + 20))
 
 
+# Percentile-based thresholds calibrated from 424-record dataset (2026-04-10).
+# Original fixed thresholds (900/850/800...) were designed for scores up to ~960 pts.
+# Dataset max is 450 pts, so all posts graded F — these fix that.
 GRADE_MAP = [
-    (900, "A+"), (850, "A"),  (800, "A-"),
-    (750, "B+"), (700, "B"),  (650, "B-"),
-    (600, "C+"), (550, "C"),  (500, "C-"),
-    (400, "D"),  (0,   "F"),
+    (403, "A+"), (251, "A"),  (240, "A-"),
+    (183, "B+"), (170, "B"),  (146, "B-"),
+    (107, "C+"), (91,  "C"),  (47,  "C-"),
+    (42,  "D"),  (0,   "F"),
 ]
 
 def grade(pts):
@@ -155,8 +158,13 @@ def main():
     recs = fetch_all()
     print(f"Records: {len(recs)}")
 
+    # Only compute benchmark for 120H snapshots (mature, final scores).
+    # Skip 24H/48H/72H/96H intermediate snapshots.
+    recs_120h = [r for r in recs if r["fields"].get("SCRAPE AGE") == "120H"]
+    print(f"120H snapshots: {len(recs_120h)}")
+
     updated = 0
-    for r in recs:
+    for r in recs_120h:
         f = r["fields"]
         likes    = f.get("LIKES") or 0
         comments = f.get("COMMENTS") or 0
