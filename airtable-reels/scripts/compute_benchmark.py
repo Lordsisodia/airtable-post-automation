@@ -184,12 +184,16 @@ def main():
         tier = TIER_MAP.get(g, "?")
         b   = badges(lm, cm, er, likes, pts)
 
+        # Compute ENGAGEMENT_RATE: (likes + comments) / followers
+        er = (likes + comments) / followers if followers > 0 else 0.0
+
         fields = {
             "BENCHMARK SCORE":   round(bs, 4),
             "BENCHMARK POINTS": pts,
             "GRADE":            g,
             "TIER":             tier,
             "BADGES":           "; ".join(b) if b else "",
+            "ENGAGEMENT_RATE":  round(er, 6),
         }
 
         patch_record(r["id"], fields, dry_run=args.dry_run)
