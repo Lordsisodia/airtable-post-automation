@@ -1,0 +1,37 @@
+# Credentials — NEVER commit
+.env
+*.env
+credentials/
+*.json
+!node_modules/**/package.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Logs
+logs/
+*.log
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Node
+node_modules/
+package-lock.json
+
+# Temp files
+*.tmp
+*.swp
+*.swo
+
+# Local data
+median_stats.json
+
+# Git (don't commit the workflows readme — it contains placeholder secrets)
+.github/workflows/README_SETUP_GUIDE.md
