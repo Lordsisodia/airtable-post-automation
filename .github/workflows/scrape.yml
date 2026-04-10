@@ -39,7 +39,7 @@ jobs:
           AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
           APIFY_TOKEN:  ${{ secrets.APIFY_TOKEN }}
         run: |
-          cd skills/airtable-reels/scripts
+          cd airtable-reels/scripts
           python3 compute_medians.py
           python3 compute_benchmark.py --execute
 
@@ -47,5 +47,5 @@ jobs:
         env:
           AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
         run: |
-          cd skills/airtable-reels/scripts
+          cd airtable-reels/scripts
           python3 wire_buttons.py --execute
