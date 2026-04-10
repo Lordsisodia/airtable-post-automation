@@ -43,9 +43,10 @@ jobs:
           python3 compute_medians.py
           python3 compute_benchmark.py --execute
 
-      - name: Wire buttons
-        env:
-          AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
-        run: |
-          cd airtable-reels/scripts
-          python3 wire_buttons.py --execute
+      # NOTE: OPEN REEL / OPEN PIC are computed Airtable button fields.
+      # They cannot accept API writes. To enable them:
+      # 1. In Airtable UI, open each button field → Customize → "Link to URL field"
+      # 2. Point it at the POST URL field. Once configured, the buttons will
+      #    automatically open the right URL — no script needed.
+      # Run this manually to populate them once configured:
+      # cd airtable-reels/scripts && python3 wire_buttons.py --execute
