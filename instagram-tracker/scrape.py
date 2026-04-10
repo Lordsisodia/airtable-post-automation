@@ -316,6 +316,7 @@ def build_fields(
         "VIEWS":              views,
         "PLAYS":              plays,
         "SCRAPE STATUS":       "OK",
+        "POST STATUS":         "ACTIVE",
     }
 
 # ── PROCESSING ─────────────────────────────────────────────────────────────────
