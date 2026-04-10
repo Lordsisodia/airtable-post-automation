@@ -1,401 +1,242 @@
 #!/usr/bin/env python3
 """
-ALJ Instagram Performance Tracker — Per-Post Snapshot Schema
-Scrape latest posts from 10 model IG accounts and write one row per post
-per snapshot to "Performance Reels Database".
+ALJ Instagram Performance Tracker — Single-Phase Upsert
 
-Snapshot ages: 24H, 48H, 72H, 96H, 120H
-Deduplication key: SHORTCODE + SCRAPE DATE + SCRAPE AGE
+Scrapes posts from all accounts (last 3 days), then upserts to Airtable:
+  - Existing rows: update with fresh DAY3 stats
+  - New rows: create with PENDING status
 
-Usage:
-  python scrape.py                          # daily mode, all accounts
-  python scrape.py --dry-run                # fetch, print, don't write
-  python scrape.py --account RINXRENX       # single account only
-  python scrape.py --backfill                # re-scrape posts < 5 days old for velocity
+Actor: apify~instagram-post-scraper (basicData, all accounts in one call)
 """
 
-import os, sys, re, json, time, argparse
-from datetime import date, timedelta, datetime, timezone
+import os, json, time, argparse
+from datetime import date
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── CREDENTIALS ────────────────────────────────────────────────────────────────
+# -- CREDENTIALS ---------------------------------------------------------------
 
 APIFY_TOKEN  = os.environ.get("APIFY_TOKEN", "")
 AIRTABLE_PAT = os.environ.get("AIRTABLE_PAT", "")
 BASE_ID      = "appi9PUu4ZqKiOXkw"
-TABLE_ID     = "tblCWODP44zR22p8D"
+TABLE_ID     = "tbldSoSrRuAEdQ9Ya"
 
-# ── ACCOUNTS ───────────────────────────────────────────────────────────────────
+# -- ACCOUNTS (username for API, display name for Airtable) ---------------------
 
 ACCOUNTS = [
-    {"name": "RIN_JAPAN518",   "url": "https://www.instagram.com/RIN_JAPAN518/"},
-    {"name": "RINXRENX",       "url": "https://www.instagram.com/RINXRENX/"},
-    {"name": "REN.ABG",        "url": "https://www.instagram.com/REN.ABG/"},
-    {"name": "YOURELLAMIRA",   "url": "https://www.instagram.com/YOURELLAMIRA/"},
-    {"name": "ELLA_ABG",       "url": "https://www.instagram.com/ELLA_ABG/"},
-    {"name": "ELLAMOCHIMIRA_", "url": "https://www.instagram.com/ELLAMOCHIMIRA_/"},
-    {"name": "ONLYREXFIT",     "url": "https://www.instagram.com/ONLYREXFIT/"},
-    {"name": "_REXTYLER_",     "url": "https://www.instagram.com/_REXTYLER_/"},
-    {"name": "ONLYTYLERREX",   "url": "https://www.instagram.com/ONLYTYLERREX/"},
-    {"name": "ABG.RICEBUNNY",  "url": "https://www.instagram.com/abg.ricebunny/"},
+    {"name": "RIN_JAPAN518",   "username": "RIN_JAPAN518"},
+    {"name": "RINXRENX",       "username": "RINXRENX"},
+    {"name": "REN.ABG",        "username": "REN.ABG"},
+    {"name": "YOURELLAMIRA",   "username": "yourellamira"},
+    {"name": "ELLA_ABG",       "username": "ella_abg"},
+    {"name": "ELLAMOCHIMIRA_", "username": "ellamochimira_"},
+    {"name": "ONLYREXFIT",     "username": "onlyrexfit"},
+    {"name": "_REXTYLER_",     "username": "_rextyler_"},
+    {"name": "ONLYTYLERREX",   "username": "onlytylerrex"},
+    {"name": "ABG.RICEBUNNY",  "username": "abg.ricebunny"},
 ]
 
-RESULTS_LIMIT = 15
-APIFY_ACTOR   = "apify~instagram-scraper"
-MAX_SCRAPE_AGE_HOURS = 120   # only track posts up to 5 days old
+# -- HELPERS -------------------------------------------------------------------
 
-# ── HELPERS ────────────────────────────────────────────────────────────────────
-
-def shortcode_from_url(url) -> str:
-    """Handle both plain URL strings and Airtable URL field objects {url, text}."""
-    if isinstance(url, dict):
-        url = url.get("url", "") or ""
-    elif not isinstance(url, str):
-        url = ""
-    m = re.search(r"/(?:p|reel|tv)/([A-Za-z0-9_-]+)", url)
-    return m.group(1) if m else ""
-
-def week_number(d: date) -> str:
-    return f"Week {d.isocalendar()[1]}"
-
-def hours_old(post_timestamp: str) -> int | None:
-    """Return hours between post timestamp and now, or None if timestamp is missing."""
-    if not post_timestamp:
-        return None
-    try:
-        posted = datetime.fromisoformat(post_timestamp.replace("Z", "+00:00"))
-        now = datetime.now(timezone.utc)
-        delta = now - posted
-        return int(delta.total_seconds() / 3600)
-    except (ValueError, TypeError):
-        return None
-
-def scrape_age_label(hours: int) -> str:
-    """Return 24H, 48H, 72H, 96H, or 120H for posts under 5 days old."""
-    if hours <= 24:   return "24H"
-    if hours <= 48:   return "48H"
-    if hours <= 72:   return "72H"
-    if hours <= 96:   return "96H"
-    if hours <= 120:  return "120H"
-    return None       # older than 5 days — skip
-
-def calc_engagement_rate(likes: int, comments: int, followers: int) -> float:
-    if not followers:
-        return 0.0
-    return round((likes + comments) / followers * 100, 2)
-
-def post_type(post: dict) -> str:
-    t = post.get("type", "")
+def post_type(t: str) -> str:
     if t in ("GraphVideo", "XDTGraphReel", "Video", "Reel"):
         return "REEL"
-    if t in ("GraphImage", "Image", "Photo"):
-        return "PIC"
     if t in ("GraphSidecar", "Sidecar", "CAROUSEL"):
         return "CAROUSEL"
-    # Fallback: infer from URL when type is null
-    url = post.get("url") or post.get("inputUrl") or ""
-    if "/reel/" in url or "/tv/" in url:
-        return "REEL"
-    if "/p/" in url:
-        return "PIC"
     return "PIC"
 
-def is_null_shell(post: dict) -> bool:
-    return (
-        post.get("type") is None
-        and post.get("ownerUsername") is None
-        and post.get("likesCount") is None
-        and post.get("videoPlayCount") is None
-    )
+def week_number(d) -> str:
+    return f"Week {d.isocalendar()[1]:02d}"
 
-# ── APIFY ──────────────────────────────────────────────────────────────────────
+# -- APIFY ---------------------------------------------------------------------
 
-def apify_headers():
-    return {"Authorization": f"Bearer {APIFY_TOKEN}", "Content-Type": "application/json"}
-
-def apify_run_scraper(input_payload: dict) -> list[dict]:
+def apify_scrape(usernames: list[str]) -> list[dict]:
+    """Scrape posts from all usernames in one call. Returns list of post dicts."""
+    headers = {"Authorization": f"Bearer {APIFY_TOKEN}", "Content-Type": "application/json"}
     r = requests.post(
-        f"https://api.apify.com/v2/acts/{APIFY_ACTOR}/runs",
-        headers=apify_headers(),
-        json=input_payload,
+        "https://api.apify.com/v2/acts/apify~instagram-post-scraper/runs",
+        headers=headers,
+        json={
+            "dataDetailLevel": "basicData",
+            "onlyPostsNewerThan": "3 days",
+            "resultsLimit": 24,
+            "skipPinnedPosts": False,
+            "username": usernames,
+        },
         timeout=30,
     )
     r.raise_for_status()
     run_id = r.json()["data"]["id"]
-    print(f"    Apify run: {run_id}")
+    print(f"  Apify run: {run_id}")
 
     for i in range(60):
         time.sleep(10)
         sr = requests.get(
-            f"https://api.apify.com/v2/acts/{APIFY_ACTOR}/runs/{run_id}",
-            headers=apify_headers(),
-            timeout=15,
+            f"https://api.apify.com/v2/acts/apify~instagram-post-scraper/runs/{run_id}",
+            headers=headers, timeout=15
         )
         sr.raise_for_status()
         status = sr.json()["data"]["status"]
         if i % 3 == 0:
-            print(f"    [{i*10}s] {status}")
+            print(f"  [{i * 10}s] {status}")
         if status == "SUCCEEDED":
             break
         if status in ("FAILED", "ABORTED", "TIMED-OUT"):
-            raise RuntimeError(f"Apify run {run_id} ended: {status}")
+            raise RuntimeError(f"Apify run ended: {status}")
     else:
-        raise TimeoutError(f"Apify run {run_id} timed out after 10 min")
+        raise TimeoutError("Apify timed out after 10 minutes")
 
-    dataset_id = sr.json()["data"]["defaultDatasetId"]
-    items_r = requests.get(
-        f"https://api.apify.com/v2/datasets/{dataset_id}/items?limit=500",
-        headers=apify_headers(),
-        timeout=30,
+    ds = sr.json()["data"]["defaultDatasetId"]
+    ir = requests.get(
+        f"https://api.apify.com/v2/datasets/{ds}/items?limit=500",
+        headers=headers, timeout=30
     )
-    items_r.raise_for_status()
-    raw = items_r.json()
-    items = raw if isinstance(raw, list) else raw.get("items", [])
-    print(f"    Fetched {len(items)} results")
-    return items
+    ir.raise_for_status()
+    items = ir.json()
+    posts = [x for x in items if x.get("shortCode")]
+    print(f"  Scraped {len(posts)} posts from {len(usernames)} accounts")
+    return posts
 
-def scrape_profiles(profile_urls: list[str], limit: int = RESULTS_LIMIT) -> list[dict]:
-    return apify_run_scraper({
-        "directUrls": profile_urls,
-        "resultsType": "posts",
-        "resultsLimit": limit,
-        "addParentData": True,
-    })
+# -- AIRTABLE ------------------------------------------------------------------
 
-def scrape_post_urls(post_urls: list[str]) -> list[dict]:
-    return apify_run_scraper({
-        "directUrls": post_urls,
-        "resultsType": "posts",
-        "resultsLimit": len(post_urls),
-        "addParentData": True,
-    })
-
-# ── AIRTABLE ───────────────────────────────────────────────────────────────────
-
-def at_headers():
+def at_headers() -> dict:
     return {"Authorization": f"Bearer {AIRTABLE_PAT}", "Content-Type": "application/json"}
 
-def at_find_row(shortcode: str, hours_old: int) -> dict | None:
-    """Find existing row by SHORTCODE + HOURS_OLD (precise dedup)."""
-    formula = f"AND({{SHORTCODE}}='{shortcode}',{{HOURS OLD}}={hours_old})"
-    r = requests.get(
-        f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}",
-        headers=at_headers(),
-        params={"filterByFormula": formula, "maxRecords": 1},
-        timeout=15,
-    )
-    r.raise_for_status()
-    records = r.json().get("records", [])
-    return records[0] if records else None
-
-def at_find_existing_snapshots(shortcode: str) -> dict:
-    """Get all existing snapshot dates + ages for a shortcode (to avoid duplicate scrapes)."""
-    formula = f"{{SHORTCODE}}='{shortcode}'"
-    r = requests.get(
-        f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}",
-        headers=at_headers(),
-        params={"filterByFormula": formula, "maxRecords": 50},
-        timeout=15,
-    )
-    r.raise_for_status()
-    records = r.json().get("records", [])
-    return {rec["fields"].get("SHORTCODE", ""): rec for rec in records}
-
-def at_upsert(fields: dict, dry_run: bool) -> str:
-    """Create or update a row. Returns record ID. Retries on timeout."""
-    shortcode = fields.get("SHORTCODE", "")
-    hours_old = fields.get("HOURS OLD", 0)
-
-    existing = at_find_row(shortcode, hours_old)
-
-    if dry_run:
-        print(f"    [DRY] {'UPDATE' if existing else 'CREATE'}: {shortcode} {hours_old}h")
-        print(f"         likes={fields.get('LIKES')}, views={fields.get('VIEWS')}, followers={fields.get('FOLLOWERS AT SCRAPE')}")
-        return existing["id"] if existing else "dry-run-id"
-
-    method = "patch" if existing else "post"
-    url = (f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}/{existing['id']}"
-           if existing else
-           f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}")
-    payload = {"fields": fields}
-
-    # Retry on timeout (Airtable occasionally times out under load)
+def at_write(method: str, url: str, payload: dict) -> dict:
     for attempt in range(3):
         try:
-            r = requests.request(
-                method, url,
-                headers=at_headers(),
-                json=payload,
-                timeout=30,
-            )
+            r = requests.request(method, url, headers=at_headers(), json=payload, timeout=30)
             r.raise_for_status()
-            break
+            return r.json()
         except requests.exceptions.ReadTimeout:
             if attempt == 2:
                 raise
-            print(f"    Timeout, retrying ({attempt + 1}/3)...")
-            time.sleep(2 ** attempt)
+            wait = 2 ** attempt
+            print(f"    Retry {attempt + 1} in {wait}s...")
+            time.sleep(wait)
+    return {}
 
-    if existing:
-        print(f"    ✓ Updated {existing['id']}")
-        return existing["id"]
-    else:
-        rec_id = r.json().get("id", "")
-        print(f"    ✓ Created {rec_id}")
-        return rec_id
+def at_fetch_index() -> dict[str, str]:
+    """Return {shortcode: record_id} for all existing records."""
+    index = {}
+    offset = None
+    while True:
+        params = {"pageSize": 100, "fields[]": ["SHORTCODE"]}
+        if offset:
+            params["offset"] = offset
+        r = requests.get(
+            f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}",
+            headers=at_headers(), params=params, timeout=30
+        )
+        r.raise_for_status()
+        data = r.json()
+        for rec in data.get("records", []):
+            sc = rec.get("fields", {}).get("SHORTCODE", "")
+            if sc:
+                index[sc] = rec["id"]
+        offset = data.get("offset")
+        if not offset:
+            break
+    return index
 
-def at_get_recent_post_urls(account_name: str, days_back: int = 7) -> list[str]:
-    """Get all stored post URLs from recent rows — used as fallback for restricted accounts."""
-    cutoff = (date.today() - timedelta(days=days_back)).isoformat()
-    formula = (
-        f"AND({{ACCOUNT}}='{account_name}',"
-        f"IS_AFTER({{DATE POSTED}},'{cutoff}'),"
-        f"OR({{OPEN REEL}}!='',{{OPEN REEL 2}}!='',{{OPEN PIC}}!=''))"
-    )
-    r = requests.get(
-        f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}",
-        headers=at_headers(),
-        params={"filterByFormula": formula, "maxRecords": 20,
-                "sort[0][field]": "DATE POSTED", "sort[0][direction]": "desc"},
-        timeout=15,
-    )
-    r.raise_for_status()
-    records = r.json().get("records", [])
-    urls = []
-    for rec in records:
-        ef = rec["fields"]
-        for field in ("OPEN REEL", "OPEN REEL 2", "OPEN PIC"):
-            u = ef.get(field, "")
-            if u and shortcode_from_url(u):
-                urls.append(u)
-    return list(dict.fromkeys(urls))
+def at_create(fields: dict) -> str:
+    resp = at_write("post", f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}", {"fields": fields})
+    return resp.get("id", "")
 
-# ── FIELD BUILDER ──────────────────────────────────────────────────────────────
+def at_update(record_id: str, fields: dict) -> None:
+    at_write("patch", f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}/{record_id}", {"fields": fields})
 
-def build_fields(
-    post: dict,
-    account_name: str,
-    profile_url: str,
-    scrape_date: date,
-    scrape_age: str,
-    hrs: int,
-    followers: int,
-) -> dict:
-    """Build Airtable fields dict for a single post snapshot."""
-    likes    = post.get("likesCount") or 0
-    comments = post.get("commentsCount") or 0
-    views    = post.get("videoPlayCount") or post.get("videoViewCount") or 0
-    plays    = views  # same value, separate field for clarity
-    pt       = post_type(post)
-    url      = post.get("url") or post.get("inputUrl") or ""
+# -- UPSERT --------------------------------------------------------------------
 
-    # Posted timestamp
-    ts = post.get("timestamp") or ""
-    try:
-        posted_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).date() if ts else scrape_date
-    except (ValueError, TypeError):
-        posted_dt = scrape_date
-
-    return {
-        "SHORTCODE":           shortcode_from_url(url),
-        "ACCOUNT":             account_name,
-        "IG PROFILE URL":      profile_url,
-        "POST URL":            url,
-        "POST TYPE":           pt,
-        "DATE POSTED":         posted_dt.isoformat(),
-        "WEEKDAY":            posted_dt.strftime("%A").upper(),
-        "WEEK NO":            week_number(posted_dt),
-        "SCRAPE DATE":         scrape_date.isoformat(),
-        "SCRAPE AGE":          scrape_age,
-        "HOURS OLD":           hrs,
-        "FOLLOWERS AT SCRAPE": followers,
-        "LIKES":              likes,
-        "COMMENTS":           comments,
-        "VIEWS":              views,
-        "PLAYS":              plays,
-        "SCRAPE STATUS":       "OK",
-        "POST STATUS":         "ACTIVE",
-    }
-
-# ── PROCESSING ─────────────────────────────────────────────────────────────────
-
-def process_account(account: dict, all_posts: list[dict], today: date, dry_run: bool,
-                    existing_snapshots: dict = None) -> int:
+def upsert_posts(posts: list[dict], index: dict, dry_run: bool) -> dict:
     """
-    For each post scraped for this account, write one row per applicable snapshot age.
-    Returns number of rows written/updated.
+    For each scraped post:
+      - If shortcode exists in Airtable → update DAY3 stats
+      - If new → create PENDING row
     """
-    name = account["name"]
-    profile_url = account["url"]
+    stats = {"updated": 0, "created": 0, "errors": 0}
 
-    # Filter posts for this account
-    posts = [
-        p for p in all_posts
-        if (p.get("ownerUsername") or "").lower() == name.lower()
-    ]
-
-    # Fallback: URL-based matching for restricted accounts
-    if not posts:
-        print(f"  ⚠  {name}: no profile posts, trying URL fallback...")
-        # Would need access to stored URLs — handled at caller level
-        return 0
-
-    if is_null_shell(posts[0]):
-        print(f"  ⚠  {name}: null shell returned, skipping")
-        return 0
-
-    followers = posts[0].get("followersCount") or 0
-    rows_written = 0
+    # Build username → display name lookup
+    username_to_name = {a["username"]: a["name"] for a in ACCOUNTS}
 
     for post in posts:
-        url = post.get("url") or post.get("inputUrl") or ""
-        shortcode = shortcode_from_url(url)
-        if not shortcode:
+        sc = post.get("shortCode", "")
+        if not sc:
             continue
 
-        # Determine post age
-        ts = post.get("timestamp") or ""
-        hrs = hours_old(ts)
-        if hrs is None:
-            print(f"    ⚠  no timestamp for {shortcode}, skipping")
-            continue
+        ts = post.get("timestamp", "")
+        try:
+            from datetime import datetime, timezone
+            posted_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).date() if ts else date.today()
+        except (ValueError, TypeError):
+            posted_dt = date.today()
 
-        age_label = scrape_age_label(hrs)
+        username = post.get("ownerUsername", "")
+        name = username_to_name.get(username, username.upper())
 
-        # Skip posts older than MAX_SCRAPE_AGE_HOURS
-        if age_label is None:
-            print(f"    → {shortcode}: {hrs}h old (>120h), skipping")
-            continue
+        views    = post.get("videoPlayCount") or post.get("videoViewCount") or 0
+        likes    = post.get("likesCount") or 0
+        comments = post.get("commentsCount") or 0
+        today    = date.today().isoformat()
 
-        # Skip if already scraped today for this age
-        snap_key = (today.isoformat(), age_label)
-        existing_map = existing_snapshots or {}
-        if shortcode in existing_map:
-            # Already processed this shortcode in this run — skip to avoid duplicates
-            continue
+        if sc in index:
+            # Update existing row
+            fields = {
+                "DAY3_VIEWS":     views,
+                "DAY3_LIKES":     likes,
+                "DAY3_COMMENTS":  comments,
+                "DAY3_DATE":      today,
+                "SCRAPE_STATUS":  "CAPTURED",
+            }
+            if dry_run:
+                print(f"  [DRY] UPDATE {sc[:12]} → CAPTURED")
+                stats["updated"] += 1
+            else:
+                try:
+                    at_update(index[sc], fields)
+                    print(f"  ~ {name} | {sc[:12]} | likes:{likes} | views:{views} | CAPTURED")
+                    stats["updated"] += 1
+                except Exception as e:
+                    print(f"  ERROR update {sc[:12]}: {e}")
+                    stats["errors"] += 1
+        else:
+            # Create new row
+            fields = {
+                "SHORTCODE":      sc,
+                "ACCOUNT":        name,
+                "POST_URL":       f"https://www.instagram.com/p/{sc}/",
+                "POST_TYPE":      post_type(post.get("type", "")),
+                "DATE_POSTED":    posted_dt.isoformat(),
+                "WEEKDAY":        posted_dt.strftime("%A").upper(),
+                "WEEK_NO":        week_number(posted_dt),
+                "DAY3_LIKES":     likes,
+                "DAY3_COMMENTS":  comments,
+                "DAY3_VIEWS":     views,
+                "SCRAPE_STATUS":  "CAPTURED",
+            }
+            if dry_run:
+                print(f"  [DRY] CREATE {sc[:12]} ({name})")
+                stats["created"] += 1
+            else:
+                try:
+                    at_create(fields)
+                    print(f"  + {name} | {sc[:12]} | likes:{likes} | views:{views} | NEW")
+                    stats["created"] += 1
+                except Exception as e:
+                    print(f"  ERROR create {sc[:12]}: {e}")
+                    stats["errors"] += 1
 
-        print(f"    {name} | {shortcode[:12]} | {hrs}h | {age_label} | followers={followers}")
+        time.sleep(0.25)
 
-        fields = build_fields(post, name, profile_url, today, age_label, hrs, followers)
-        at_upsert(fields, dry_run)
-        rows_written += 1
+    return stats
 
-        # Track that we've processed this shortcode in this run
-        if existing_snapshots is not None:
-            existing_snapshots[shortcode] = True
-
-    return rows_written
-
-# ── MAIN ───────────────────────────────────────────────────────────────────────
+# -- MAIN ----------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="ALJ Instagram per-post snapshot scraper")
-    parser.add_argument("--dry-run",  action="store_true")
-    parser.add_argument("--account",  help="Single account to process")
-    parser.add_argument("--backfill", action="store_true", help="Re-scrape posts < 5 days old from Airtable URLs")
+    parser = argparse.ArgumentParser(description="ALJ Instagram scraper — single-phase upsert")
+    parser.add_argument("--dry-run", action="store_true", help="Print what would happen, no writes")
     args = parser.parse_args()
 
     if not APIFY_TOKEN:
@@ -403,87 +244,39 @@ def main():
     if not AIRTABLE_PAT:
         sys.exit("ERROR: AIRTABLE_PAT not set")
 
+    usernames = [a["username"] for a in ACCOUNTS]
     today = date.today()
-    target = [a for a in ACCOUNTS if not args.account or a["name"] == args.account]
+    print(f"\n{'=' * 60}")
+    print(f"ALJ INSTAGRAM SCRAPER  --  {today}")
+    print(f"Accounts: {len(usernames)}  |  Actor: instagram-post-scraper (basicData)")
+    if args.dry_run:
+        print("DRY RUN -- nothing will be written")
+    print(f"{'=' * 60}\n")
 
-    if args.backfill:
-        # Backfill: get post URLs from Airtable for recent posts, re-scrape them
-        print(f"\n{'='*60}")
-        print(f"BACKFILL MODE — re-scraping posts < 5 days old")
-        print(f"{'='*60}\n")
-        all_urls = []
-        account_urls = {}
-        for account in target:
-            urls = at_get_recent_post_urls(account["name"], days_back=7)
-            if urls:
-                all_urls.extend(urls)
-                account_urls[account["name"]] = urls
-        if not all_urls:
-            print("No URLs found to backfill")
-            return
-        print(f"Scraping {len(all_urls)} post URLs...")
-        scraped = scrape_post_urls(all_urls)
-        for account in target:
-            acc_urls = account_urls.get(account["name"], [])
-            acc_posts = [p for p in scraped if shortcode_from_url(p.get("url","")) in
-                         [shortcode_from_url(u) for u in acc_urls]]
-            existing = {}
-            process_account(account, acc_posts, today, args.dry_run, existing)
+    # Scrape all accounts in one call
+    print("[1] Scraping posts from Apify...")
+    posts = apify_scrape(usernames)
+
+    if not posts:
+        print("No posts scraped. Exiting.")
         return
 
-    # ── Normal daily mode ──────────────────────────────────────────
-    print(f"\n{'='*60}")
-    print(f"ALJ DAILY SCRAPE  —  {today}  —  {len(target)} accounts")
-    if args.dry_run:
-        print("DRY RUN — nothing will be written")
-    print(f"{'='*60}\n")
+    # Fetch existing Airtable index
+    print("\n[2] Fetching Airtable index...")
+    index = at_fetch_index()
+    print(f"  {len(index)} existing records")
 
-    print(f"Scraping {len(target)} profiles...")
-    all_posts = scrape_profiles([a["url"] for a in target], RESULTS_LIMIT)
+    # Upsert
+    print(f"\n[3] Upserting to Airtable...")
+    stats = upsert_posts(posts, index, args.dry_run)
 
-    # ── Restricted account fallback ──────────────────────────────────
-    restricted = [
-        a for a in target
-        if not any((p.get("ownerUsername") or "").lower() == a["name"].lower() for p in all_posts)
-    ]
-
-    fallback_posts = []
-    if restricted:
-        print(f"\n  Restricted: {[a['name'] for a in restricted]}")
-        all_fallback_urls = []
-        for account in restricted:
-            urls = at_get_recent_post_urls(account["name"], days_back=7)
-            print(f"    {account['name']}: {len(urls)} stored URLs found")
-            all_fallback_urls.extend(urls)
-
-        if all_fallback_urls:
-            print(f"  Scraping {len(all_fallback_urls)} fallback URLs...")
-            fallback_posts = scrape_post_urls(list(dict.fromkeys(all_fallback_urls)))
-            print(f"  Fallback returned {len(fallback_posts)} posts")
-
-    # Deduplicate by shortcode — profile scrape + fallback scrape can return same post
-    seen: set = set()
-    combined_posts: list = []
-    for p in all_posts + fallback_posts:
-        sc = shortcode_from_url(p.get("url") or p.get("inputUrl") or "")
-        if sc and sc not in seen:
-            seen.add(sc)
-            combined_posts.append(p)
-
-    total_rows = 0
-    for account in target:
-        print(f"\n[{account['name']}]")
-        n = process_account(account, combined_posts, today, args.dry_run)
-        total_rows += n
-        time.sleep(0.3)
-
-    print(f"\n{'='*60}")
-    if args.dry_run:
-        print(f"✅ Dry run complete — {total_rows} rows would be written")
-    else:
-        print(f"✅ Done — {total_rows} rows upserted for {today}")
-    print(f"{'='*60}")
-
+    print(f"\n{'=' * 60}")
+    print(f"=== DONE ===")
+    print(f"  Updated: {stats['updated']}")
+    print(f"  Created: {stats['created']}")
+    print(f"  Errors:  {stats['errors']}")
+    print(f"{'=' * 60}")
 
 if __name__ == "__main__":
+    import sys
     main()

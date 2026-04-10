@@ -2,9 +2,10 @@ name: Daily IG Scrape
 
 on:
   schedule:
-    # Run at 16:45 UTC = 11:45pm ICT (Vietnam). Adjust to your timezone.
-    - cron: "45 16 * * *"
-  workflow_dispatch:   # manual trigger at github.com/actions
+    - cron: "0 6 * * *"    # 6am UTC
+    - cron: "0 18 * * *"   # 6pm UTC
+  workflow_dispatch:        # manual trigger at github.com/actions
+  push:                    # also run on every push (for testing)
 
 jobs:
   scrape:
@@ -21,8 +22,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          pip install -r instagram-tracker/requirements.txt
+        run: pip install requests python-dotenv
 
       - name: Run scrape
         env:
@@ -35,16 +35,7 @@ jobs:
       - name: Compute benchmark scores
         env:
           AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
-          APIFY_TOKEN:  ${{ secrets.APIFY_TOKEN }}
         run: |
           cd airtable-reels/scripts
           python3 compute_medians.py
           python3 compute_benchmark.py --execute
-
-      # NOTE: OPEN REEL / OPEN PIC are computed Airtable button fields.
-      # They cannot accept API writes. To enable them:
-      # 1. In Airtable UI, open each button field → Customize → "Link to URL field"
-      # 2. Point it at the POST URL field. Once configured, the buttons will
-      #    automatically open the right URL — no script needed.
-      # Run this manually to populate them once configured:
-      # cd airtable-reels/scripts && python3 wire_buttons.py --execute
