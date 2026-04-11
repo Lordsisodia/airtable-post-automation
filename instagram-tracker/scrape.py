@@ -67,26 +67,26 @@ def shortcode_from_url(url: str) -> str:
 
 # -- APIFY ---------------------------------------------------------------------
 
-def apify_post_scraper(usernames: list[str], newer_than: str = "1 day") -> list[dict]:
-    """Use instagram-scraper to get posts from usernames. Returns list of post dicts."""
+def apify_scrape_accounts(usernames: list[str], results_type: str, newer_than: str = "1 day", limit: int = 100) -> list[dict]:
+    """Call instagram-scraper for a specific results type (posts or reels)."""
     headers = {"Authorization": f"Bearer {APIFY_TOKEN}", "Content-Type": "application/json"}
-    # Build profile URLs for each username
     profile_urls = [f"https://www.instagram.com/{u}/" for u in usernames]
     r = requests.post(
         "https://api.apify.com/v2/acts/apify~instagram-scraper/runs",
         headers=headers,
         json={
             "directUrls": profile_urls,
-            "resultsType": "posts",
+            "resultsType": results_type,
             "onlyPostsNewerThan": newer_than,
-            "resultsLimit": 24,
+            "resultsLimit": limit,
             "skipPinnedPosts": False,
         },
         timeout=30,
     )
     r.raise_for_status()
     run_id = r.json()["data"]["id"]
-    print(f"  Apify run started: {run_id}")
+    type_label = results_type.upper()
+    print(f"  [{type_label}] Apify run started: {run_id}")
 
     for i in range(60):
         time.sleep(10)
@@ -97,13 +97,13 @@ def apify_post_scraper(usernames: list[str], newer_than: str = "1 day") -> list[
         sr.raise_for_status()
         status = sr.json()["data"]["status"]
         if i % 3 == 0:
-            print(f"  [{i * 10}s] {status}")
+            print(f"  [{type_label}] [{i * 10}s] {status}")
         if status == "SUCCEEDED":
             break
         if status in ("FAILED", "ABORTED", "TIMED-OUT"):
-            raise RuntimeError(f"Apify run ended: {status}")
+            raise RuntimeError(f"[{type_label}] Apify run ended: {status}")
     else:
-        raise TimeoutError("Apify timed out after 10 minutes")
+        raise TimeoutError(f"[{type_label}] Apify timed out after 10 minutes")
 
     ds = sr.json()["data"]["defaultDatasetId"]
     ir = requests.get(
@@ -112,14 +112,29 @@ def apify_post_scraper(usernames: list[str], newer_than: str = "1 day") -> list[
     )
     ir.raise_for_status()
     items = ir.json()
-    # instagram-scraper returns "code" instead of "shortCode"
     posts = []
     for x in items:
         sc = x.get("shortCode") or x.get("code") or ""
         if sc:
             posts.append(x)
-    print(f"  Scraped {len(posts)} posts from {len(usernames)} accounts")
+    print(f"  [{type_label}] Scraped {len(posts)} items from {len(usernames)} accounts")
     return posts
+
+
+def apify_post_scraper(usernames: list[str], newer_than: str = "1 day", limit: int = 100) -> list[dict]:
+    """Scrape both posts and reels, return deduplicated list."""
+    posts = apify_scrape_accounts(usernames, "posts", newer_than, limit)
+    reels = apify_scrape_accounts(usernames, "reels", newer_than, limit)
+
+    # Deduplicate by shortcode — prefer the reel version if duplicate exists
+    seen = {}
+    for item in reels + posts:
+        sc = item.get("shortCode") or item.get("code") or ""
+        if sc and sc not in seen:
+            seen[sc] = item
+    result = list(seen.values())
+    print(f"  Combined (deduped): {len(result)} total items ({len(posts)} posts + {len(reels)} reels)")
+    return result
 
 
 def apify_scrape_posts(post_urls: list[str]) -> dict[str, dict]:
