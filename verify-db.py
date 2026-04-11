@@ -7,11 +7,20 @@ BASE = "appi9PUu4ZqKiOXkw"
 TABLE = "tblCWODP44zR22p8D"
 H = {"Authorization": f"Bearer {PAT}"}
 
-url = f"https://api.airtable.com/v0/{BASE}/{TABLE}"
-params = {"fields[]": ["ACCOUNT", "POST TYPE", "POST URL"]}
-r = requests.get(url, headers=H, params=params, timeout=30)
-r.raise_for_status()
-records = r.json()["records"]
+records = []
+offset = None
+while True:
+    params = {"pageSize": 100, "fields[]": ["ACCOUNT", "POST TYPE", "POST URL"]}
+    if offset:
+        params["offset"] = offset
+    url = f"https://api.airtable.com/v0/{BASE}/{TABLE}"
+    r = requests.get(url, headers=H, params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    records.extend(data.get("records", []))
+    offset = data.get("offset")
+    if not offset:
+        break
 
 accounts = {}
 for rec in records:
