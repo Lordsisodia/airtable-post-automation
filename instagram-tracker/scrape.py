@@ -316,7 +316,7 @@ def run_phase1(usernames: list[str], index: dict, dry_run: bool) -> dict:
             "COMMENTS":      comments,
             "VIEWS":         views,
             "PLAYS":         views,
-            "SCRAPE STATUS": "PENDING",
+            "SCRAPE STATUS": "OK",
             "SCRAPE DATE":   date.today().isoformat(),
         }
 
