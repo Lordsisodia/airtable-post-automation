@@ -29,14 +29,15 @@ ACCOUNTS = [
     {"name": "ABG.RICEBUNNY",   "username": "abg.ricebunny"},
 ]
 
-def apify_reel_scraper(profile_url: str, results_limit: int = 100) -> list[dict]:
-    """Use instagram-reel-scraper to get ALL reels from a single profile."""
+def apify_reel_scraper(profile_url: str, results_limit: int = 200) -> list[dict]:
+    """Use instagram-scraper (resultsType=reels) to get ALL reels from a profile."""
     headers = {"Authorization": f"Bearer {APIFY_TOKEN}", "Content-Type": "application/json"}
     r = requests.post(
-        "https://api.apify.com/v2/acts/apify~instagram-reel-scraper/runs",
+        "https://api.apify.com/v2/acts/apify~instagram-scraper/runs",
         headers=headers,
         json={
             "directUrls": [profile_url],
+            "resultsType": "reels",
             "resultsLimit": results_limit,
             "skipPinnedPosts": False,
         },
