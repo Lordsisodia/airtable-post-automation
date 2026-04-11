@@ -5,7 +5,6 @@ on:
     - cron: "0 6 * * *"    # 6am UTC — discovery + stats capture
     - cron: "0 18 * * *"   # 6pm UTC — discovery only
   workflow_dispatch:        # manual trigger at github.com/actions
-  push:                      # run on every push (for testing)
 
 jobs:
   # Phase 1: Discovery — new posts (runs on every trigger)
