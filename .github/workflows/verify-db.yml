@@ -7,41 +7,18 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - name: Query Airtable
-        run: |
-          pip install requests
-          python3 - << 'PYEOF'
-import os, requests
-PAT = os.environ["AIRTABLE_PAT"]
-BASE = "appi9PUu4ZqKiOXkw"
-TABLE = "tblCWODP44zR22p8D"
-H = {"Authorization": f"Bearer {PAT}"}
+      - name: Checkout
+        uses: actions/checkout@v4
 
-# Get all records with ACCOUNT field
-url = f"https://api.airtable.com/v0/{BASE}/{TABLE}"
-params = {"fields[]": ["ACCOUNT", "POST TYPE", "POST URL"]}
-r = requests.get(url, headers=H, params=params, timeout=30)
-r.raise_for_status()
-records = r.json()["records"]
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-# Count per account
-accounts = {}
-for rec in records:
-    f = rec["fields"]
-    acc = f.get("ACCOUNT", "UNKNOWN")
-    pt = f.get("POST TYPE", "UNKNOWN")
-    if acc not in accounts:
-        accounts[acc] = {"total": 0, "types": {}}
-    accounts[acc]["total"] += 1
-    accounts[acc]["types"][pt] = accounts[acc]["types"].get(pt, 0) + 1
+      - name: Install deps
+        run: pip install requests
 
-print(f"\nTotal records in Airtable: {len(records)}")
-print(f"\n{'Account':<20} {'Total':>6}  Breakdown")
-print("-" * 50)
-for acc in sorted(accounts.keys()):
-    d = accounts[acc]
-    types_str = " | ".join(f"{k}:{v}" for k, v in sorted(d["types"].items()))
-    print(f"{acc:<20} {d['total']:>6}  {types_str}")
-PYEOF
+      - name: Run verification
         env:
           AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
+        run: python3 verify-db.py
