@@ -1,0 +1,43 @@
+name: Backfill Reels
+
+on:
+  workflow_dispatch:
+    inputs:
+      account:
+        description: "Account to backfill (leave blank for all)"
+        required: false
+        type: string
+      limit:
+        description: "Max reels per account (default 200)"
+        required: false
+        type: number
+        default: 200
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: Run backfill
+        env:
+          AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
+          APIFY_TOKEN:  ${{ secrets.APIFY_TOKEN }}
+        run: |
+          cd instagram-tracker
+          ACCOUNTS="${{ inputs.account }}"
+          if [ -n "$ACCOUNTS" ]; then
+            python3 backfill_reels.py --accounts $ACCOUNTS --limit ${{ inputs.limit || 200 }}
+          else
+            python3 backfill_reels.py --limit ${{ inputs.limit || 200 }}
+          fi
