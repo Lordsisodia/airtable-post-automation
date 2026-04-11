@@ -184,9 +184,9 @@ def at_request(method: str, url: str, payload: dict = None) -> dict:
             r = requests.request(method, url, headers=at_headers(), json=payload, timeout=30)
             r.raise_for_status()
             return r.json()
-        except requests.exceptions.ReadTimeout:
+        except requests.exceptions.ReadTimeout as e:
             if attempt == 2:
-                raise
+                raise RuntimeError(f"Request timed out after 3 retries: {e}")
             wait = 2 ** attempt
             print(f"    Retry {attempt + 1} in {wait}s...")
             time.sleep(wait)
@@ -261,7 +261,9 @@ def at_fetch_pending(age_days: int = 5) -> list[dict]:
 
 def at_create(fields: dict) -> str:
     resp = at_request("post", f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}", {"fields": fields})
-    return resp.get("id", "")
+    if "id" not in resp:
+        raise RuntimeError(f"Airtable create failed: {resp}")
+    return resp["id"]
 
 def at_update(record_id: str, fields: dict) -> None:
     at_request("patch", f"https://api.airtable.com/v0/{BASE_ID}/{TABLE_ID}/{record_id}", {"fields": fields})
